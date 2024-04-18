@@ -91,7 +91,7 @@ func main() {
 	flag.Parse()
 
 	//If no flags are provided, count Bytes, Lines and Words
-	if !countBytes && !countLines && !countWords {
+	if !countBytes && !countLines && !countWords && !countChars {
 		countBytes = true
 		countLines = true
 		countWords = true
