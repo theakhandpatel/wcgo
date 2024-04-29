@@ -5,8 +5,11 @@ import (
 	"bytes"
 	"flag"
 	"fmt"
+	"io"
 	"math"
 	"os"
+	"runtime"
+	"sync"
 )
 
 type FileStats struct {
@@ -78,6 +81,31 @@ func GetFileStats(countLines, countWords, countBytes, countChars bool, data []by
 	return fileStats, nil
 }
 
+func outputStats(out io.Writer, fileCounts []FileStats, l, w, c, m bool) {
+	totalCounts := FileStats{}
+	for _, fileCount := range fileCounts {
+		totalCounts.Bytes += fileCount.Bytes
+		totalCounts.Lines += fileCount.Lines
+		totalCounts.Words += fileCount.Words
+		totalCounts.Chars += fileCount.Chars
+	}
+
+	//Find the maximum length of the counts
+	maximumCount := math.Max(
+		math.Max(float64(totalCounts.Bytes), float64(totalCounts.Lines)),
+		math.Max(float64(totalCounts.Words), float64(totalCounts.Chars)),
+	)
+	maxDigits := int(math.Floor(math.Log10(maximumCount))) + 1
+
+	for _, fileCount := range fileCounts {
+		fmt.Fprintln(out, fileCount.String(l, w, c, m, maxDigits))
+	}
+
+	if len(fileCounts) > 1 {
+		fmt.Fprintln(out, totalCounts.String(l, w, c, m, maxDigits))
+	}
+}
+
 func main() {
 
 	var countBytes bool
@@ -103,53 +131,70 @@ func main() {
 		filepaths = append(filepaths, "/dev/stdin")
 	}
 
-	totalCounts := &FileStats{
-		Path: "total",
-	}
-	var fileCounts []*FileStats
+	resCh := make(chan []FileStats)
+	doneCh := make(chan struct{})
+	filesCh := make(chan string)
 
-	for _, filepath := range filepaths {
-		fileStat := &FileStats{}
-		data, err := os.ReadFile(filepath)
-		if err != nil {
-			fileStat = &FileStats{
-				Path: filepath,
-				Err:  &err,
-			}
-			fileCounts = append(fileCounts, fileStat)
-			continue
+	go func() {
+		defer close(filesCh)
+		for _, filepath := range filepaths {
+			filesCh <- filepath
 		}
+	}()
 
-		fileStat, err = GetFileStats(countLines, countWords, countBytes, countChars, data, filepath)
-		if err != nil {
-			fileStat = &FileStats{
-				Path: filepath,
-				Err:  &err,
+	wg := sync.WaitGroup{}
+
+	for i := 0; i < runtime.NumCPU(); i++ {
+		wg.Add(1)
+
+		go func() {
+			defer wg.Done()
+
+			for filepath := range filesCh {
+				fileStat := &FileStats{}
+				data, err := os.ReadFile(filepath)
+
+				if err != nil {
+					fileStat = &FileStats{
+						Path: filepath,
+						Err:  &err,
+					}
+					resCh <- []FileStats{*fileStat}
+					continue
+				}
+
+				fileStat, err = GetFileStats(countLines, countWords, countBytes, countChars, data, filepath)
+				if err != nil {
+					fileStat = &FileStats{
+						Path: filepath,
+						Err:  &err,
+					}
+					// fileCounts = append(fileCounts, fileStat)
+					resCh <- []FileStats{*fileStat}
+					continue
+				}
+
+				resCh <- []FileStats{*fileStat}
 			}
-			fileCounts = append(fileCounts, fileStat)
-			continue
+
+		}()
+	}
+
+	go func() {
+		wg.Wait()
+		close(doneCh)
+	}()
+
+	fileCounts := []FileStats{}
+
+	for {
+		select {
+		case data := <-resCh:
+			fileCounts = append(fileCounts, data...)
+		case <-doneCh:
+			outputStats(os.Stdout, fileCounts, countLines, countWords, countBytes, countChars)
+			return
 		}
-
-		fileCounts = append(fileCounts, fileStat)
-		totalCounts.Bytes += fileStat.Bytes
-		totalCounts.Lines += fileStat.Lines
-		totalCounts.Words += fileStat.Words
-		totalCounts.Chars += fileStat.Chars
-	}
-
-	//Find the maximum length of the counts
-	maximumCount := math.Max(
-		math.Max(float64(totalCounts.Bytes), float64(totalCounts.Lines)),
-		math.Max(float64(totalCounts.Words), float64(totalCounts.Chars)),
-	)
-	maxDigits := int(math.Floor(math.Log10(maximumCount))) + 1
-
-	for _, fileCount := range fileCounts {
-		fmt.Println(fileCount.String(countLines, countWords, countBytes, countChars, maxDigits))
-	}
-
-	if len(fileCounts) > 1 {
-		fmt.Println(totalCounts.String(countLines, countWords, countBytes, countChars, maxDigits))
 	}
 
 }
